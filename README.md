@@ -1,5 +1,5 @@
 # DetectGPT
-Pytorch implementation of [DetectGPT](https://arxiv.org/pdf/2301.11305.pdf)
+An open-source Pytorch implementation of [DetectGPT](https://arxiv.org/pdf/2301.11305.pdf)
 
 ## Introduction
 DetectGPT is an amazing method to determine whether a piece of text is written by large language models (like ChatGPT, GPT3, GPT2, BLOOM etc). However, we couldn't find any open-source implementation of it. Therefore this is the implementation of the paper. 
