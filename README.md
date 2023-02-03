@@ -7,7 +7,10 @@ DetectGPT is an amazing method to determine whether a piece of text is written b
 ## installation
 pip install -r requirements.txt
 
+
 ## Usage
+***Here v1.1 refers to DetectGPT, v1.0 is GPTZero***
+
 ### Using Python function
 ```python3 infer.py```
 #### example
