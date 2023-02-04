@@ -1,5 +1,5 @@
 """
-DistilRoberta-base (trained on opentext)
+bert-large-uncased (trained on opentext)
 Split cased
 
 This code a slight modification of perplexity by hugging face
@@ -18,6 +18,7 @@ import re
 from transformers import GPT2LMHeadModel, GPT2TokenizerFast
 from transformers import pipeline
 from transformers import T5ForConditionalGeneration, T5Tokenizer
+from transformers import AutoTokenizer, BartForConditionalGeneration
 
 from collections import OrderedDict
 from HTML_MD_Components import hightlightAITextHTML
@@ -44,9 +45,9 @@ class GPT2PPLV2:
 
         self.max_length = self.model.config.n_positions
         self.stride = 512
-        self.threshold = 60
+        self.threshold = 1.1
 
-        self.unmasker = pipeline("fill-mask", model="distilroberta-base", device=0)
+        self.unmasker = pipeline("fill-mask", model="bert-large-uncased", device=0)
 
     def __call__(self, *args):
         version = args[-1]
@@ -63,66 +64,79 @@ class GPT2PPLV2:
 ###############################################
 
     def replaceMask(self, text):
-        list_generated_texts = self.unmasker(text)
-        output = []
-        for generated_texts in list_generated_texts:
-            output.append([x["sequence"] for x in generated_texts])
-        return output
+        with torch.no_grad():
+            list_generated_texts = self.unmasker(text)
+        return list_generated_texts
 
     def isSame(self, text1, text2):
         return text1 == text2
 
-    def maskRandomWord(self, text, visited):
+    def maskRandomWord(self, text, ratio):
         words = list(re.finditer("[^\d\W]+", text))
         if len(words) == 0:
             return []
 
-        word_idx = random.randint(0, len(words)-1)
-        while word_idx in visited:
-            word_idx = random.randint(0, len(words)-1)
+        num_of_groups = math.ceil(len(words)/2)
+        word_indices = np.sort(np.random.choice(np.arange(0, num_of_groups+1), ratio, replace=False))
 
         # peform mask filling
-        word = words[word_idx]
+        offset = 0
         mask_text = text
-        start, end = word.span()
-        mask_text = mask_text[:start] + "<mask>" + mask_text[end:]
+        starts = []
+        original_texts = []
+        for word_idx in word_indices:
+            word = words[min(word_idx*2, len(words)-1)]
+            start, end = word.span()
+            original_texts.append(mask_text[start+offset:end+offset])
+            mask_text = mask_text[:start+offset] + "[MASK]" + mask_text[end+offset:]
+            starts.append(start+offset)
+            offset += len("<mask>") - (end-start)
 
-        return mask_text, word_idx
+        return mask_text, starts, original_texts
 
-    def multiMaskRandomWord(self, texts, listVisited):
+    def multiMaskRandomWord(self, texts, ratio):
         mask_texts = []
-        word_indices = []
+        mask_indices = []
+        original_texts = []
         for i in range(len(texts)):
-            mask_text, word_idx = self.maskRandomWord(texts[i], listVisited[i])
+            mask_text, word_indices, list_original_text = self.maskRandomWord(texts[i], ratio)
             mask_texts.append(mask_text)
-            word_indices.append(word_idx)
-        return mask_texts, word_indices
+            mask_indices.append(word_indices)
+            original_texts.append(list_original_text)
+        return mask_texts, mask_indices, original_texts
 
     def multiSetAdd(self, sets, elements):
         for i in range(len(sets)):
             sets[i].add(elements[i])
         return sets
 
-    def chooseBestFittingText(self, texts, original_text):
-        for text in texts:
-            if text == original_text:
-                continue
-            return text
-        return None
+    def chooseBestFittingText(self, list_texts, original_texts, mask_text, mask_indices):
+        return_text = mask_text
+        mask_indices = list(re.finditer("[MASK]", mask_text))
+        offset = 0
+        for i in range(len(list_texts)):
+            texts = list_texts[i]
+            start,end = mask_indices[i].span()
+            start = max(start + offset - 1, 0)
+            end = end + offset
+            original_text = original_texts[i]
+            for j in range(len(texts)):
+                text = texts[j]["token_str"]
+                if text.strip().lower() == original_texts[i].lower():
+                    continue
+                return_text = return_text[:start] + text + return_text[end:]
+                offset += len(text) - len("<mask>") - 1
+                break
 
-    def multiChooseBestFittingText(self, list_texts, original_text):
+        return return_text
+
+    def multiChooseBestFittingText(self, list_texts, original_texts, mask_text, list_mask_indices):
         output = []
-        for texts in list_texts:
-            output.append(self.chooseBestFittingText(texts, original_text))
+        for i in range(len(list_texts)):
+            output.append(self.chooseBestFittingText(list_texts[i], original_texts[i], mask_text[i], list_mask_indices[i]))
         return output
 
     def mask(self, original_text, text, n=2, remaining=100):
-        """
-        text: string representing the sentence
-        n: top n mask-filling to be choosen
-        remaining: The remaining slots to be fill
-        """
-
         if remaining <= 0:
             return []
 
@@ -132,18 +146,13 @@ class GPT2PPLV2:
             ratio = int(0.15 * len(texts))
 
             generated_texts = []
-            choosen_sets = []
             for _ in range(n):
                 generated_texts.append(original_text)
-                choosen_sets.append(set())
 
-            for _ in range(ratio):
-                mask_texts, word_indices = self.multiMaskRandomWord(generated_texts, choosen_sets)
-
+            for _ in range(1):
+                mask_texts, mask_indices, original_texts = self.multiMaskRandomWord(generated_texts, ratio)
                 list_generated_sentences = self.replaceMask(mask_texts)
-                self.multiSetAdd(choosen_sets, word_indices)
-
-                generated_texts = self.multiChooseBestFittingText(list_generated_sentences, original_text)
+                generated_texts = self.multiChooseBestFittingText(list_generated_sentences, original_texts, mask_texts, mask_indices)
 
             out_sentences.extend(generated_texts)
             remaining -= n
@@ -151,29 +160,22 @@ class GPT2PPLV2:
         return out_sentences
 
     def getVerdict(self, score):
-        if score < 0.8:
+        if score < self.threshold:
             return "This text is most likely written by an Human"
-        elif score < 0.9:
-            return "This text could be written by a human"
-        elif score < 1.0:
-            return "This text could be generated by an A.I."
         else:
             return "This text is most likely generated by an A.I."
 
     def getScore(self, sentence):
         original_sentence = sentence
         sentence_length = len(list(re.finditer("[^\d\W]+", sentence)))
-        print("masking")
         remaining = int(min(max(100, sentence_length * 1/9), 200))
         sentences = self.mask(original_sentence, original_sentence, n=100, remaining=remaining)
-        print("masking done")
 
         real_log_likelihood = self.getLogLikelihood(original_sentence)
 
         generated_log_likelihoods = []
         for sentence in sentences:
             generated_log_likelihoods.append(self.getLogLikelihood(sentence))
-        # print(generated_log_likelihoods)
 
         if len(generated_log_likelihoods) == 0:
             return -1
@@ -191,8 +193,6 @@ class GPT2PPLV2:
         var_generated_log_likelihood /= (len(generated_log_likelihoods) - 1)
 
         diff = real_log_likelihood - mean_generated_log_likelihood
-
-        # print(real_log_likelihood)
 
         score = diff/var_generated_log_likelihood**(1/2)
 
@@ -230,36 +230,26 @@ class GPT2PPLV2:
         for line in lines:
             if re.search("[a-zA-Z0-9]+", line) == None:
                 continue
-            if len(offset) > 0:
-                line = offset + line
-                offset = ""
-            # remove the new line pr space in the first sentence if exists
-            if line[0] == "\n" or line[0] == " ":
-                line = line[1:]
-            if line[-1] == "\n" or line[-1] == " ":
-                line = line[:-1]
-            elif line[-1] == "[" or line[-1] == "(":
-                offset = line[-1]
-                line = line[:-1]
             score, diff, sd = self.getScore(line)
             if score == -1 or math.isnan(score):
                 continue
             scores.append(score)
 
             final_lines.append(line)
-            if score > 0.8:
+            if score > self.threshold:
                 labels.append(1)
-                prob = "{:.2f}%\n(A.I.)".format(normCdf(abs(0.8 - score)) * 100)
+                prob = "{:.2f}%\n(A.I.)".format(normCdf(abs(self.threshold - score)) * 100)
                 probs.append(prob)
             else:
                 labels.append(0)
-                prob = "{:.2f}%\n(Human)".format(normCdf(abs(0.8 - score)) * 100)
+                prob = "{:.2f}%\n(Human)".format(normCdf(abs(self.threshold - score)) * 100)
                 probs.append(prob)
 
         mean_score = sum(scores)/len(scores)
 
-        mean_prob = normCdf(abs(0.8 - mean_score)) * 100
-        label = 0 if mean_score > 0.8 else 1
+        mean_prob = normCdf(abs(self.threshold - mean_score)) * 100
+        label = 0 if mean_score > self.threshold else 1
+        print(f"probability for {'A.I.' if label == 0 else 'Human'}:", "{:.2f}%".format(mean_prob))
         return {"prob": "{:.2f}%".format(mean_prob), "label": label}, self.getVerdict(mean_score), hightlightAITextHTML(final_lines, probs, labels)
 
     def getLogLikelihood(self,sentence):
@@ -380,3 +370,4 @@ class GPT2PPLV2:
         else:
             label = 1
             return "The Text is written by Human.", label
+n
