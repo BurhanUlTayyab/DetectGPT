@@ -370,4 +370,3 @@ class GPT2PPLV2:
         else:
             label = 1
             return "The Text is written by Human.", label
-n
