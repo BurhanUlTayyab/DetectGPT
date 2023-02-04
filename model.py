@@ -202,8 +202,8 @@ class GPT2PPLV2:
 
         words = re.split("[ \n]", sentence)
 
-        if len(words) < 100:
-            return {"status": "Please input more text (min 100 words)"}, "Please input more text (min 100 characters)", None
+        # if len(words) < 100:
+        #     return {"status": "Please input more text (min 100 words)"}, "Please input more text (min 100 characters)", None
 
         groups = len(words) // chunk_value + 1
         lines = []
@@ -369,4 +369,3 @@ class GPT2PPLV2:
         else:
             label = 1
             return "The Text is written by Human.", label
-n
