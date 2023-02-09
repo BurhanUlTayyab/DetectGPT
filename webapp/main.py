@@ -52,7 +52,6 @@ with gr.Blocks(title="SG-GPTZero", css="#discord {text-align: center} #submit {b
         with gr.Row(elem_id="row1"):
             with gr.Column(scale=1):
                 InputTextBox = gr.Textbox(lines=7, placeholder="Please Insert your text(s) here", label="Texts")
-                chunkSlider = gr.Slider(100, 1000, 100, label="Number of words in each chunk")
                 sumbit_btn = gr.Button("Submit", elem_id="submit")
             with gr.Column(scale=1):
                 OutputLabels = gr.JSON(label="Output")
@@ -61,7 +60,7 @@ with gr.Blocks(title="SG-GPTZero", css="#discord {text-align: center} #submit {b
                     with gr.Box():
                         OutputHighlightedText = gr.HTML(show_label=False)
 
-        sumbit_btn.click(lambda x, y: inference(x, y, "v1.1"), inputs=[InputTextBox, chunkSlider], outputs=[OutputLabels, OutputTextBox, OutputHighlightedText], api_name="infer")
+        sumbit_btn.click(lambda x: inference(x, 512, "v1.1"), inputs=[InputTextBox], outputs=[OutputLabels, OutputTextBox, OutputHighlightedText], api_name="infer")
     with gr.Tab("V1 (GPT-Zero)"):
         with gr.Row(elem_id="row1"):
             with gr.Column(scale=1):
