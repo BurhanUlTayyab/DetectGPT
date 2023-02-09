@@ -30,8 +30,6 @@ from scipy.stats import norm
 from difflib import SequenceMatcher
 from multiprocessing.pool import ThreadPool
 
-from rejected_words import rejected_words
-
 def similar(a, b):
     return SequenceMatcher(None, a, b).ratio()
 

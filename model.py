@@ -24,13 +24,10 @@ from transformers import T5Tokenizer
 from transformers import AutoTokenizer, BartForConditionalGeneration
 
 from collections import OrderedDict
-from HTML_MD_Components import hightlightAITextHTML
 
 from scipy.stats import norm
 from difflib import SequenceMatcher
 from multiprocessing.pool import ThreadPool
-
-from rejected_words import rejected_words
 
 def similar(a, b):
     return SequenceMatcher(None, a, b).ratio()
@@ -269,7 +266,7 @@ class GPT2PPLV2:
         mean_prob = normCdf(abs(self.threshold - mean_score)) * 100
         label = 0 if mean_score > self.threshold else 1
         print(f"probability for {'A.I.' if label == 0 else 'Human'}:", "{:.2f}%".format(mean_prob))
-        return {"prob": "{:.2f}%".format(mean_prob), "label": label}, self.getVerdict(mean_score), hightlightAITextHTML(final_lines, probs, labels)
+        return {"prob": "{:.2f}%".format(mean_prob), "label": label}, self.getVerdict(mean_score)
 
     def getLogLikelihood(self,sentence):
         encodings = self.tokenizer(sentence, return_tensors="pt")
