@@ -1,6 +1,7 @@
+#!/usr/bin/env python3
+
 """
-bert-large-uncased (trained on opentext)
-Split cased
+T5
 
 This code a slight modification of perplexity by hugging face
 https://huggingface.co/docs/transformers/perplexity
@@ -9,15 +10,17 @@ Both this code and the orignal code are published under the MIT license.
 
 by Burhan Ul tayyab and Nicholas Chua
 """
-
+import time
 import torch
+import itertools
 import math
 import numpy as np
 import random
 import re
+import transformers
 from transformers import GPT2LMHeadModel, GPT2TokenizerFast
 from transformers import pipeline
-from transformers import T5ForConditionalGeneration, T5Tokenizer
+from transformers import T5Tokenizer
 from transformers import AutoTokenizer, BartForConditionalGeneration
 
 from collections import OrderedDict
@@ -25,6 +28,7 @@ from HTML_MD_Components import hightlightAITextHTML
 
 from scipy.stats import norm
 from difflib import SequenceMatcher
+from multiprocessing.pool import ThreadPool
 
 def similar(a, b):
     return SequenceMatcher(None, a, b).ratio()
@@ -35,19 +39,59 @@ def normCdf(x):
 def likelihoodRatio(x, y):
     return normCdf(x)/normCdf(y)
 
+torch.manual_seed(0)
+np.random.seed(0)
+
 # find a better way to abstract the class
 class GPT2PPLV2:
-    def __init__(self, device="cuda", model_id="gpt2"):
+    def __init__(self, device="cuda", model_id="gpt2-medium"):
         self.device = device
         self.model_id = model_id
         self.model = GPT2LMHeadModel.from_pretrained(model_id).to(device)
         self.tokenizer = GPT2TokenizerFast.from_pretrained(model_id)
 
         self.max_length = self.model.config.n_positions
-        self.stride = 512
-        self.threshold = 1.1
+        self.stride = 51
+        self.threshold = 0.7
 
-        self.unmasker = pipeline("fill-mask", model="bert-large-uncased", device=0)
+        self.t5_model = transformers.AutoModelForSeq2SeqLM.from_pretrained("t5-large").to(device).half()
+        self.t5_tokenizer = T5Tokenizer.from_pretrained("t5-large", model_max_length=512)
+
+    def apply_extracted_fills(self, masked_texts, extracted_fills):
+        texts = []
+        for idx, (text, fills) in enumerate(zip(masked_texts, extracted_fills)):
+            tokens = list(re.finditer("<extra_id_\d+>", text))
+            if len(fills) < len(tokens):
+                continue
+
+            offset = 0
+            for fill_idx in range(len(tokens)):
+                start, end = tokens[fill_idx].span()
+                text = text[:start+offset] + fills[fill_idx] + text[end+offset:]
+                offset = offset - (end - start) + len(fills[fill_idx])
+            texts.append(text)
+
+        return texts
+
+    def unmasker(self, text, num_of_masks):
+        num_of_masks = max(num_of_masks)
+        stop_id = self.t5_tokenizer.encode(f"<extra_id_{num_of_masks}>")[0]
+        tokens = self.t5_tokenizer(text, return_tensors="pt", padding=True)
+        for key in tokens:
+            tokens[key] = tokens[key].to(self.device)
+
+        output_sequences = self.t5_model.generate(**tokens, max_length=512, do_sample=True, top_p=0.96, num_return_sequences=1, eos_token_id=stop_id)
+        results = self.t5_tokenizer.batch_decode(output_sequences, skip_special_tokens=False)
+
+        texts = [x.replace("<pad>", "").replace("</s>", "").strip() for x in results]
+        pattern = re.compile("<extra_id_\d+>")
+        extracted_fills = [pattern.split(x)[1:-1] for x in texts]
+        extracted_fills = [[y.strip() for y in x] for x in extracted_fills]
+
+        perturbed_texts = self.apply_extracted_fills(text, extracted_fills)
+
+        return perturbed_texts
+
 
     def __call__(self, *args):
         version = args[-1]
@@ -59,103 +103,84 @@ class GPT2PPLV2:
         else:
             return "Model version not defined"
 
-################################################
+#################################ppp###############
 #  Version 1.1 apis
 ###############################################
 
-    def replaceMask(self, text):
+    def replaceMask(self, text, num_of_masks):
         with torch.no_grad():
-            list_generated_texts = self.unmasker(text)
+            list_generated_texts = self.unmasker(text, num_of_masks)
+
         return list_generated_texts
 
     def isSame(self, text1, text2):
         return text1 == text2
 
+    # code took reference from https://github.com/eric-mitchell/detect-gpt
     def maskRandomWord(self, text, ratio):
-        words = list(re.finditer("[^\d\W]+", text))
-        if len(words) == 0:
-            return []
+        span = 2
+        tokens = text.split(' ')
+        mask_string = '<<<mask>>>'
 
-        num_of_groups = math.ceil(len(words)/2)
-        word_indices = np.sort(np.random.choice(np.arange(0, num_of_groups+1), ratio, replace=False))
+        n_spans = ratio//(span + 2)
 
-        # peform mask filling
-        offset = 0
-        mask_text = text
-        starts = []
-        original_texts = []
-        for word_idx in word_indices:
-            word = words[min(word_idx*2, len(words)-1)]
-            start, end = word.span()
-            original_texts.append(mask_text[start+offset:end+offset])
-            mask_text = mask_text[:start+offset] + "[MASK]" + mask_text[end+offset:]
-            starts.append(start+offset)
-            offset += len("<mask>") - (end-start)
+        n_masks = 0
+        while n_masks < n_spans:
+            start = np.random.randint(0, len(tokens) - span)
+            end = start + span
+            search_start = max(0, start - 1)
+            search_end = min(len(tokens), end + 1)
+            if mask_string not in tokens[search_start:search_end]:
+                tokens[start:end] = [mask_string]
+                n_masks += 1
 
-        return mask_text, starts, original_texts
+        # replace each occurrence of mask_string with <extra_id_NUM>, where NUM increments
+        num_filled = 0
+        for idx, token in enumerate(tokens):
+            if token == mask_string:
+                tokens[idx] = f'<extra_id_{num_filled}>'
+                num_filled += 1
+        assert num_filled == n_masks, f"num_filled {num_filled} != n_masks {n_masks}"
+        text = ' '.join(tokens)
+        return text, n_masks
 
-    def multiMaskRandomWord(self, texts, ratio):
+    def multiMaskRandomWord(self, text, ratio, n):
         mask_texts = []
-        mask_indices = []
-        original_texts = []
-        for i in range(len(texts)):
-            mask_text, word_indices, list_original_text = self.maskRandomWord(texts[i], ratio)
+        list_num_of_masks = []
+        for i in range(n):
+            mask_text, num_of_masks = self.maskRandomWord(text, ratio)
             mask_texts.append(mask_text)
-            mask_indices.append(word_indices)
-            original_texts.append(list_original_text)
-        return mask_texts, mask_indices, original_texts
+            list_num_of_masks.append(num_of_masks)
+        return mask_texts, list_num_of_masks
 
-    def multiSetAdd(self, sets, elements):
-        for i in range(len(sets)):
-            sets[i].add(elements[i])
-        return sets
+    def getGeneratedTexts(self, args):
+        original_text = args[0]
+        n = args[1]
+        texts = list(re.finditer("[^\d\W]+", original_text))
+        ratio = int(0.3 * len(texts))
 
-    def chooseBestFittingText(self, list_texts, original_texts, mask_text, mask_indices):
-        return_text = mask_text
-        mask_indices = list(re.finditer("[MASK]", mask_text))
-        offset = 0
-        for i in range(len(list_texts)):
-            texts = list_texts[i]
-            start,end = mask_indices[i].span()
-            start = max(start + offset - 1, 0)
-            end = end + offset
-            original_text = original_texts[i]
-            for j in range(len(texts)):
-                text = texts[j]["token_str"]
-                if text.strip().lower() == original_texts[i].lower():
-                    continue
-                return_text = return_text[:start] + text + return_text[end:]
-                offset += len(text) - len("<mask>") - 1
-                break
-
-        return return_text
-
-    def multiChooseBestFittingText(self, list_texts, original_texts, mask_text, list_mask_indices):
-        output = []
-        for i in range(len(list_texts)):
-            output.append(self.chooseBestFittingText(list_texts[i], original_texts[i], mask_text[i], list_mask_indices[i]))
-        return output
+        mask_texts, list_num_of_masks = self.multiMaskRandomWord(original_text, ratio, n)
+        list_generated_sentences = self.replaceMask(mask_texts, list_num_of_masks)
+        return list_generated_sentences
 
     def mask(self, original_text, text, n=2, remaining=100):
+        """
+        text: string representing the sentence
+        n: top n mask-filling to be choosen
+        remaining: The remaining slots to be fill
+        """
+
         if remaining <= 0:
             return []
 
+        torch.manual_seed(0)
+        np.random.seed(0)
+        start_time = time.time()
         out_sentences = []
-        while remaining > 0: # O(R)
-            texts = list(re.finditer("[^\d\W]+", original_text))
-            ratio = int(0.15 * len(texts))
-
-            generated_texts = []
-            for _ in range(n):
-                generated_texts.append(original_text)
-
-            for _ in range(1):
-                mask_texts, mask_indices, original_texts = self.multiMaskRandomWord(generated_texts, ratio)
-                list_generated_sentences = self.replaceMask(mask_texts)
-                generated_texts = self.multiChooseBestFittingText(list_generated_sentences, original_texts, mask_texts, mask_indices)
-
-            out_sentences.extend(generated_texts)
-            remaining -= n
+        pool = ThreadPool(remaining//n)
+        out_sentences = pool.map(self.getGeneratedTexts, [(original_text, n) for _ in range(remaining//n)])
+        out_sentences = list(itertools.chain.from_iterable(out_sentences))
+        end_time = time.time()
 
         return out_sentences
 
@@ -168,35 +193,28 @@ class GPT2PPLV2:
     def getScore(self, sentence):
         original_sentence = sentence
         sentence_length = len(list(re.finditer("[^\d\W]+", sentence)))
-        remaining = int(min(max(100, sentence_length * 1/9), 200))
-        sentences = self.mask(original_sentence, original_sentence, n=100, remaining=remaining)
+        # remaining = int(min(max(100, sentence_length * 1/9), 200))
+        remaining = 50
+        sentences = self.mask(original_sentence, original_sentence, n=50, remaining=remaining)
 
         real_log_likelihood = self.getLogLikelihood(original_sentence)
 
         generated_log_likelihoods = []
         for sentence in sentences:
-            generated_log_likelihoods.append(self.getLogLikelihood(sentence))
+            generated_log_likelihoods.append(self.getLogLikelihood(sentence).cpu().detach().numpy())
 
         if len(generated_log_likelihoods) == 0:
             return -1
 
-        # generate the mean
-        mean_generated_log_likelihood = 0.0
-        for generated_log_likelihood in generated_log_likelihoods:
-            mean_generated_log_likelihood += generated_log_likelihood
-        mean_generated_log_likelihood /= len(generated_log_likelihoods)
-
-        var_generated_log_likelihood = 0.0
-        # generate the mean
-        for generated_log_likelihood in generated_log_likelihoods:
-            var_generated_log_likelihood += (generated_log_likelihood - mean_generated_log_likelihood)**2
-        var_generated_log_likelihood /= (len(generated_log_likelihoods) - 1)
+        generated_log_likelihoods = np.asarray(generated_log_likelihoods)
+        mean_generated_log_likelihood = np.mean(generated_log_likelihoods)
+        std_generated_log_likelihood = np.std(generated_log_likelihoods)
 
         diff = real_log_likelihood - mean_generated_log_likelihood
 
-        score = diff/var_generated_log_likelihood**(1/2)
+        score = diff/(std_generated_log_likelihood)
 
-        return float(score), float(diff), float(var_generated_log_likelihood**(1/2))
+        return float(score), float(diff), float(std_generated_log_likelihood)
 
     def call_1_1(self, sentence, chunk_value):
         sentence = re.sub("\[[0-9]+\]", "", sentence) # remove all the [numbers] cause of wiki
@@ -209,7 +227,6 @@ class GPT2PPLV2:
         groups = len(words) // chunk_value + 1
         lines = []
         stride = len(words) // groups + 1
-        # print(stride)
         for i in range(0, len(words), stride):
             start_pos = i
             end_pos = min(i+stride, len(words))
@@ -284,7 +301,7 @@ class GPT2PPLV2:
     def call_1(self, sentence):
         """
         Takes in a sentence split by full stop
-        and print the perplexity of the total sentence
+p        and print the perplexity of the total sentence
         split the lines based on full stop and find the perplexity of each sentence and print
         average perplexity
         Burstiness is the max perplexity of each sentence
@@ -294,8 +311,8 @@ class GPT2PPLV2:
         total_valid_char = re.findall("[a-zA-Z0-9]+", sentence)
         total_valid_char = sum([len(x) for x in total_valid_char]) # finds len of all the valid characters a sentence
 
-        if total_valid_char < 100:
-            return {"status": "Please input more text (min 100 characters)"}, "Please input more text (min 100 characters)"
+        # if total_valid_char < 100:
+        #    return {"status": "Please input more text (min 100 characters)"}, "Please input more text (min 100 characters)"
 
         lines = re.split(r'(?<=[.?!][ \[\(])|(?<=\n)\s*',sentence)
         lines = list(filter(lambda x: (x is not None) and (len(x) > 0), lines))
