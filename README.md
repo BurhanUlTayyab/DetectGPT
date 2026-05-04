@@ -1,7 +1,8 @@
+## Check out our new project: Faz, a safety layer between AI agents and databases: https://github.com/fazhq/faz
+
+
 # DetectGPT
 An open-source Pytorch implementation of [DetectGPT](https://arxiv.org/pdf/2301.11305.pdf)
-
-[![Follow on Twitter](https://img.shields.io/twitter/follow/BurhanUlT?style=social)](https://x.com/BurhanUlT)
 
 
 ## Introduction
